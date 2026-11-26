@@ -1,0 +1,159 @@
+import logging
+import os
+import re
+import signal
+import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
+from dataclasses import dataclass, field
+from pathlib import Path
+from threading import Event
+from typing import Callable
+from urllib.parse import urlsplit
+
+from .clients import ApiError, Router, Telegram
+from .delivery import Delivery, DeliveryReceipts
+from .menu import Menu
+
+
+LOG = logging.getLogger("sms_inbox_bot")
+UPDATE_TIMEOUT = 20
+INBOX_INTERVAL = 2
+
+
+@dataclass(frozen=True)
+class Settings:
+    telegram_token: str = field(repr=False)
+    router_token: str = field(repr=False)
+    recipient_id: int
+    router_url: str
+    state_dir: Path
+
+    @classmethod
+    def load(cls) -> "Settings":
+        telegram_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+        if not re.fullmatch(r"[1-9][0-9]*:[a-zA-Z0-9_-]+", telegram_token):
+            raise ValueError("Set TELEGRAM_BOT_TOKEN to a Telegram bot token.")
+        router_token = os.environ.get("SMS_ROUTER_APP_TOKEN", "")
+        if not re.fullmatch(r"[!-~]+", router_token):
+            raise ValueError("Set SMS_ROUTER_APP_TOKEN to a router app token.")
+        recipient = os.environ.get("TELEGRAM_RECIPIENT_ID", "")
+        if not re.fullmatch(r"[1-9][0-9]{0,15}", recipient) or int(recipient) >= 2**52:
+            raise ValueError("Set TELEGRAM_RECIPIENT_ID to a positive numeric Telegram user ID.")
+
+        router_url = os.environ.get("SMS_ROUTER_BASE_URL", "http://127.0.0.1:18090")
+        try:
+            url = urlsplit(router_url)
+            if (
+                url.scheme not in {"http", "https"}
+                or not url.hostname or url.port == 0
+                or url.username is not None or url.query or url.fragment
+                or any(character.isspace() for character in router_url)
+            ):
+                raise ValueError
+        except ValueError:
+            raise ValueError("Set SMS_ROUTER_BASE_URL to a valid HTTP(S) base URL.") from None
+        return cls(
+            telegram_token, router_token, int(recipient), router_url,
+            Path(os.environ.get("SMS_INBOX_STATE_DIR", "state")),
+        )
+
+
+def poll_until_stopped(
+    stop: Event, operation: Callable[[], bool], idle_seconds: float
+) -> None:
+    backoff = 1
+    while not stop.is_set():
+        try:
+            more_work = operation()
+        except ApiError as error:
+            delay = max(backoff, error.retry_after)
+            LOG.warning("%s. Retrying in %s seconds.", error, delay)
+            stop.wait(delay)
+            backoff = min(backoff * 2, 60)
+        else:
+            backoff = 1
+            if not more_work:
+                stop.wait(idle_seconds)
+
+
+def serve(settings: Settings, stop: Event) -> None:
+    router = Router(settings.router_url, settings.router_token)
+    telegram = Telegram(settings.telegram_token)
+    menu = Menu(router, telegram, settings.recipient_id)
+    offset = None
+
+    def poll_updates() -> bool:
+        nonlocal offset
+        options = {"offset": offset} if offset is not None else {}
+        updates = telegram.call(
+            "getUpdates", request_timeout=UPDATE_TIMEOUT + 5, **options,
+            allowed_updates=["message", "callback_query"],
+            timeout=UPDATE_TIMEOUT,
+        )
+        if not isinstance(updates, list):
+            raise ApiError("Telegram getUpdates", "invalid update list")
+        for update in updates:
+            if stop.is_set():
+                break
+            if not isinstance(update, dict) or type(update.get("update_id")) is not int:
+                raise ApiError("Telegram getUpdates", "invalid update")
+            try:
+                menu.handle(update)
+            except ApiError as error:
+                if error.retryable:
+                    raise
+                LOG.warning("%s. Skipping the Telegram update.", error)
+            offset = update["update_id"] + 1
+        return bool(updates)
+
+    def run_delivery() -> None:
+        with closing(DeliveryReceipts(settings.state_dir / "receipts.sqlite3")) as receipts:
+            delivery = Delivery(router, telegram, settings.recipient_id, receipts)
+            poll_until_stopped(stop, lambda: delivery.poll(stop), idle_seconds=INBOX_INTERVAL)
+
+    with ThreadPoolExecutor(max_workers=1) as workers:
+        worker = workers.submit(run_delivery)
+        worker.add_done_callback(lambda _: stop.set())
+        try:
+            poll_until_stopped(stop, poll_updates, idle_seconds=0.1)
+        finally:
+            stop.set()
+        worker.result()
+
+
+def main() -> int:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
+    try:
+        settings = Settings.load()
+    except ValueError as error:
+        LOG.error("%s", error)
+        return 2
+
+    stop = Event()
+
+    def request_stop(_signum, _frame) -> None:
+        stop.set()
+
+    signal.signal(signal.SIGINT, request_stop)
+    signal.signal(signal.SIGTERM, request_stop)
+    os.umask(0o077)
+    try:
+        settings.state_dir.mkdir(parents=True, exist_ok=True)
+        with closing(sqlite3.connect(settings.state_dir / "worker.sqlite3", timeout=0)) as lock:
+            try:
+                lock.execute("BEGIN EXCLUSIVE")
+            except sqlite3.OperationalError:
+                LOG.error("Could not lock the state directory. Check for an existing worker.")
+                return 1
+            LOG.info("SMS inbox bot started.")
+            serve(settings, stop)
+    except Exception as error:
+        LOG.error("SMS inbox bot stopped with an unexpected %s.", type(error).__name__)
+        return 1
+    LOG.info("SMS inbox bot stopped.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
