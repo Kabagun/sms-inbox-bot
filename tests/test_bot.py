@@ -159,20 +159,18 @@ class MenuTests(unittest.TestCase):
         self.callback(enabled["callback_data"])
         self.router.subscribe.assert_called_once_with(self.stream.id, False)
 
-    def test_help_explains_subscriptions_and_links_to_project_and_issues(self):
+    def test_help_sends_only_subscription_instructions(self):
         self.message(HELP)
 
         self.router.streams.assert_not_called()
-        self.telegram.call.assert_called_once()
-        response = self.telegram.call.call_args
-        self.assertEqual(response.args, ("sendMessage",))
-        self.assertEqual(response.kwargs["chat_id"], RECIPIENT)
-        self.assertIn("«Подписках»", response.kwargs["text"])
-        buttons = response.kwargs["reply_markup"]["inline_keyboard"][0]
-        self.assertEqual([button["url"] for button in buttons], [
-            "https://github.com/Kabagun/sms-inbox-bot",
-            "https://github.com/Kabagun/sms-inbox-bot/issues",
-        ])
+        self.telegram.call.assert_called_once_with(
+            "sendMessage",
+            chat_id=RECIPIENT,
+            text=(
+                "В «Подписках» включите нужные потоки. Новые SMS из них "
+                "будут приходить сюда целиком."
+            ),
+        )
 
     def test_revoked_stream_is_removed_without_a_subscription_request(self):
         self.router.streams.return_value = []

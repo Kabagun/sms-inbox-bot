@@ -10,13 +10,6 @@ MAIN_KEYBOARD = {
     "keyboard": [[{"text": SUBSCRIPTIONS}, {"text": HELP}]],
     "resize_keyboard": True,
 }
-PROJECT_URL = "https://github.com/Kabagun/sms-inbox-bot"
-HELP_LINKS = {
-    "inline_keyboard": [[
-        {"text": "О проекте", "url": PROJECT_URL},
-        {"text": "Вопросы на GitHub", "url": f"{PROJECT_URL}/issues"},
-    ]],
-}
 
 
 def stream_key(stream_id: str) -> str:
@@ -84,7 +77,6 @@ class Menu:
                     "В «Подписках» включите нужные потоки. Новые SMS из них "
                     "будут приходить сюда целиком."
                 ),
-                reply_markup=HELP_LINKS,
             )
 
     def _handle_callback(self, query: dict) -> None:
