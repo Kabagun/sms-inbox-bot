@@ -13,7 +13,7 @@ from unittest.mock import Mock, patch
 from sms_inbox_bot.__main__ import Settings, main, poll_until_stopped, serve
 from sms_inbox_bot.clients import ApiError, Router, Sms, Stream, Telegram
 from sms_inbox_bot.delivery import CONTINUATION, Delivery, DeliveryReceipts, sms_parts
-from sms_inbox_bot.menu import SUBSCRIPTIONS, Menu, stream_key
+from sms_inbox_bot.menu import HELP, SUBSCRIPTIONS, Menu, stream_key
 
 
 RECIPIENT = 123456
@@ -124,6 +124,7 @@ class MenuTests(unittest.TestCase):
             with self.subTest(chat=chat, user=user):
                 self.message("/start", chat=chat, user=user)
                 self.message(SUBSCRIPTIONS, chat=chat, user=user)
+                self.message(HELP, chat=chat, user=user)
                 self.callback(data, chat=chat, user=user)
         self.assertEqual(self.router.mock_calls, [])
         self.assertEqual(self.telegram.mock_calls, [])
@@ -131,7 +132,7 @@ class MenuTests(unittest.TestCase):
     def test_start_shows_main_keyboard_and_toggle_edits_original_message(self):
         self.message("/start")
         keyboard = self.telegram.call.call_args.kwargs["reply_markup"]
-        self.assertEqual(keyboard["keyboard"], [[{"text": SUBSCRIPTIONS}]])
+        self.assertEqual(keyboard["keyboard"], [[{"text": SUBSCRIPTIONS}, {"text": HELP}]])
         self.assertNotIn("is_persistent", keyboard)
 
         self.message(SUBSCRIPTIONS)
@@ -157,6 +158,21 @@ class MenuTests(unittest.TestCase):
         self.router.subscribe.return_value = self.stream
         self.callback(enabled["callback_data"])
         self.router.subscribe.assert_called_once_with(self.stream.id, False)
+
+    def test_help_explains_subscriptions_and_links_to_project_and_issues(self):
+        self.message(HELP)
+
+        self.router.streams.assert_not_called()
+        self.telegram.call.assert_called_once()
+        response = self.telegram.call.call_args
+        self.assertEqual(response.args, ("sendMessage",))
+        self.assertEqual(response.kwargs["chat_id"], RECIPIENT)
+        self.assertIn("«Подписках»", response.kwargs["text"])
+        buttons = response.kwargs["reply_markup"]["inline_keyboard"][0]
+        self.assertEqual([button["url"] for button in buttons], [
+            "https://github.com/Kabagun/sms-inbox-bot",
+            "https://github.com/Kabagun/sms-inbox-bot/issues",
+        ])
 
     def test_revoked_stream_is_removed_without_a_subscription_request(self):
         self.router.streams.return_value = []

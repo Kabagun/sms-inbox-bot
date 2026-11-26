@@ -5,9 +5,17 @@ from .clients import ApiError, Router, Stream, Telegram
 
 
 SUBSCRIPTIONS = "Подписки"
+HELP = "Помощь"
 MAIN_KEYBOARD = {
-    "keyboard": [[{"text": SUBSCRIPTIONS}]],
+    "keyboard": [[{"text": SUBSCRIPTIONS}, {"text": HELP}]],
     "resize_keyboard": True,
+}
+PROJECT_URL = "https://github.com/Kabagun/sms-inbox-bot"
+HELP_LINKS = {
+    "inline_keyboard": [[
+        {"text": "О проекте", "url": PROJECT_URL},
+        {"text": "Вопросы на GitHub", "url": f"{PROJECT_URL}/issues"},
+    ]],
 }
 
 
@@ -69,6 +77,15 @@ class Menu:
             except ApiError:
                 view = {"text": "Подписки сейчас недоступны. Попробуйте позже."}
             self.telegram.call("sendMessage", chat_id=self.recipient_id, **view)
+        elif text == HELP:
+            self.telegram.call(
+                "sendMessage", chat_id=self.recipient_id,
+                text=(
+                    "В «Подписках» включите нужные потоки. Новые SMS из них "
+                    "будут приходить сюда целиком."
+                ),
+                reply_markup=HELP_LINKS,
+            )
 
     def _handle_callback(self, query: dict) -> None:
         message = query.get("message", {})

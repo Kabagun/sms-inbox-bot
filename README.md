@@ -2,6 +2,8 @@
 
 SMS Inbox Bot delivers incoming messages from SMS Router to one private Telegram chat. The **Подписки** button lists the streams granted to the bot's router app. Tap a stream to turn delivery on or off.
 
+The **Помощь** button explains how to receive SMS and links to the project and its public [GitHub issue tracker](https://github.com/Kabagun/sms-inbox-bot/issues) for questions and bug reports.
+
 ## Configure
 
 Use Python 3.11 or newer. The bot uses the standard library and requires no package installation.
