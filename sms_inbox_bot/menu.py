@@ -1,3 +1,4 @@
+import json
 from collections import Counter
 from hashlib import sha256
 from html import escape
@@ -14,11 +15,25 @@ MAIN_KEYBOARD = {
 }
 
 
-def help_view(router_public_origin: str | None) -> dict:
+def help_view(
+    router_public_origin: str | None, *,
+    device_url: str | None = None, service: str = "example", sender: str = "EXAMPLE",
+) -> dict:
     origin = router_public_origin or "https://sms.example.com"
-    endpoint = escape(f"{origin}/v1/sms/<device-token>")
+    endpoint = escape(device_url or f"{origin}/v1/sms/<device-token>")
     guide = f"{router_public_origin}/" if router_public_origin else PUBLIC_HELP_URL
-    example = '{"service":"example","sender":"EXAMPLE","text":"Ваш код: 4837"}'
+    example = json.dumps(
+        {"service": service, "sender": sender, "text": "Ваш код: 4837"},
+        ensure_ascii=False, indent=2,
+    )
+    copy_link = (
+        copy_button("Копировать адрес POST", device_url) if device_url
+        else copy_button("Копировать ссылку", guide)
+    )
+    device_hint = (
+        "Это персональный адрес приёма. " if device_url
+        else "Получите персональный адрес у владельца потока. "
+    )
     return {
         "text": (
             "<b>Как отправить сообщение</b>\n\n"
@@ -29,14 +44,19 @@ def help_view(router_public_origin: str | None) -> dict:
             "<code>text</code> — полный текст сообщения. "
             "<code>sender</code> — зарегистрированный отправитель. "
             "Если у потока один отправитель, это поле можно опустить.\n\n"
-            "Получите персональный адрес с токеном у владельца потока. "
+            "Дополнительно можно передать <code>received_at</code> "
+            "(ISO 8601 с часовым поясом) и <code>device_id</code> "
+            "(идентификатор источника для защиты от повторов).\n\n"
+            f"{device_hint}"
             "Чтобы сообщения приходили сюда, включите поток в «Подписках»."
         ),
         "parse_mode": "HTML",
+        "protect_content": bool(device_url),
+        "link_preview_options": {"is_disabled": True},
         "reply_markup": {
             "inline_keyboard": [[
                 {"text": "Инструкция", "url": guide},
-                copy_button("Копировать ссылку", guide),
+                copy_link,
             ]],
         },
     }
@@ -69,11 +89,14 @@ class Menu:
     def __init__(
         self, router: Router, telegram: Telegram, recipient_id: int, *,
         router_public_origin: str | None = None,
+        device_url: str | None = None, help_service: str = "example", help_sender: str = "EXAMPLE",
     ) -> None:
         self.router = router
         self.telegram = telegram
         self.recipient_id = recipient_id
-        self.router_public_origin = router_public_origin
+        self.help_response = help_view(
+            router_public_origin, device_url=device_url, service=help_service, sender=help_sender,
+        )
 
     def _is_recipient(self, sender: dict, chat: dict) -> bool:
         return (
@@ -107,7 +130,7 @@ class Menu:
         elif text == HELP:
             self.telegram.call(
                 "sendMessage", chat_id=self.recipient_id,
-                **help_view(self.router_public_origin),
+                **self.help_response,
             )
 
     def _handle_callback(self, query: dict) -> None:

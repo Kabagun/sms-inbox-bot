@@ -29,6 +29,9 @@ class Settings:
     router_url: str
     state_dir: Path
     router_public_origin: str | None = None
+    router_device_url: str | None = field(default=None, repr=False)
+    help_service: str = "example"
+    help_sender: str = "EXAMPLE"
 
     @classmethod
     def load(cls) -> "Settings":
@@ -68,10 +71,36 @@ class Settings:
                     raise ValueError
             except ValueError:
                 raise ValueError("Set SMS_ROUTER_PUBLIC_ORIGIN to a public HTTPS origin.") from None
+        device_url = os.environ.get("SMS_ROUTER_DEVICE_URL", "")
+        if device_url:
+            try:
+                device = urlsplit(device_url)
+                if (
+                    device.scheme != "https" or not device.hostname or device.port == 0
+                    or device.username is not None or device.query or device.fragment
+                    or not re.fullmatch(r"/v1/sms/[A-Za-z0-9_-]{43}", device.path)
+                    or len(device_url) > 256
+                    or re.search(r"[\s?#<>\\]", device_url)
+                ):
+                    raise ValueError
+            except ValueError:
+                raise ValueError("Set SMS_ROUTER_DEVICE_URL to a personal HTTPS ingestion URL.") from None
+        help_service = os.environ.get("SMS_ROUTER_HELP_SERVICE", "example")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}", help_service):
+            raise ValueError("Set SMS_ROUTER_HELP_SERVICE to the registered service name.")
+        help_sender = os.environ.get("SMS_ROUTER_HELP_SENDER", "EXAMPLE")
+        if (
+            not 1 <= len(help_sender) <= 128 or not help_sender.strip()
+            or not help_sender.isprintable()
+        ):
+            raise ValueError("Set SMS_ROUTER_HELP_SENDER to the registered sender.")
         return cls(
             telegram_token, router_token, int(recipient), router_url,
             Path(os.environ.get("SMS_INBOX_STATE_DIR", "state")),
             public_origin or None,
+            device_url or None,
+            help_service,
+            help_sender,
         )
 
 
@@ -99,6 +128,9 @@ def serve(settings: Settings, stop: Event) -> None:
     menu = Menu(
         router, telegram, settings.recipient_id,
         router_public_origin=settings.router_public_origin,
+        device_url=settings.router_device_url,
+        help_service=settings.help_service,
+        help_sender=settings.help_sender,
     )
     offset = None
 

@@ -23,6 +23,7 @@ TELEGRAM_TOKEN = "12345:synthetic-token"
 APP = "/internal/v1/app"
 STUB_BOT = f"/bot{TELEGRAM_TOKEN}"
 RECEIVED_AT = "2026-01-01T12:00:00Z"
+PERSONAL_URL = "https://sms.example.net/v1/sms/" + "x" * 43
 
 
 @contextmanager
@@ -107,6 +108,21 @@ class StartupTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "SMS_ROUTER_PUBLIC_ORIGIN"):
                     Settings.load()
 
+    def test_personal_url_is_hidden_in_settings_and_rejects_other_routes(self):
+        self.assertIsNone(Settings.load().router_device_url)
+        with patch.dict(os.environ, {
+            "SMS_ROUTER_DEVICE_URL": PERSONAL_URL,
+            "SMS_ROUTER_HELP_SERVICE": "sample",
+            "SMS_ROUTER_HELP_SENDER": "SAMPLE",
+        }):
+            settings = Settings.load()
+            self.assertEqual(settings.router_device_url, PERSONAL_URL)
+            self.assertNotIn(PERSONAL_URL, repr(settings))
+            self.assertEqual((settings.help_service, settings.help_sender), ("sample", "SAMPLE"))
+        with patch.dict(os.environ, {"SMS_ROUTER_DEVICE_URL": PERSONAL_URL + "/test"}):
+            with self.assertRaisesRegex(ValueError, "SMS_ROUTER_DEVICE_URL"):
+                Settings.load()
+
 
 class MenuTests(unittest.TestCase):
     def setUp(self):
@@ -134,6 +150,7 @@ class MenuTests(unittest.TestCase):
         }})
 
     def test_private_recipient_is_required_for_messages_and_callbacks(self):
+        self.menu = Menu(self.router, self.telegram, RECIPIENT, device_url=PERSONAL_URL)
         data = f"sub:1:{stream_key(self.stream.id)}"
         for chat, user in (
             (self.chat, {"id": 999}),
@@ -207,6 +224,28 @@ class MenuTests(unittest.TestCase):
         buttons = self.telegram.call.call_args.kwargs["reply_markup"]["inline_keyboard"][0]
         self.assertEqual(buttons[0]["url"], PUBLIC_HELP_URL)
         self.assertEqual(buttons[1]["copy_text"], {"text": PUBLIC_HELP_URL})
+
+    def test_help_copies_personal_address_and_explains_optional_fields(self):
+        self.menu = Menu(
+            self.router, self.telegram, RECIPIENT,
+            router_public_origin="https://sms.example.net", device_url=PERSONAL_URL,
+            help_service="sample", help_sender="SAMPLE",
+        )
+        self.message(HELP)
+
+        payload = self.telegram.call.call_args.kwargs
+        self.assertIn(f"POST {PERSONAL_URL}", payload["text"])
+        self.assertIn("<code>received_at</code>", payload["text"])
+        self.assertIn("<code>device_id</code>", payload["text"])
+        example = unescape(payload["text"].split("<pre>", 1)[1].split("</pre>", 1)[0])
+        self.assertEqual(json.loads(example), {
+            "service": "sample", "sender": "SAMPLE", "text": "Ваш код: 4837",
+        })
+        self.assertTrue(payload["protect_content"])
+        self.assertEqual(payload["link_preview_options"], {"is_disabled": True})
+        guide, copy_address = payload["reply_markup"]["inline_keyboard"][0]
+        self.assertEqual(guide["url"], "https://sms.example.net/")
+        self.assertEqual(copy_address["copy_text"], {"text": PERSONAL_URL})
 
     def test_revoked_stream_is_removed_without_a_subscription_request(self):
         self.router.streams.return_value = []

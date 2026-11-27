@@ -2,7 +2,7 @@
 
 SMS Inbox Bot delivers incoming messages from SMS Router to one private Telegram chat. The **Подписки** button lists the streams granted to the bot's router app. Tap a stream to turn delivery on or off.
 
-The **Помощь** button shows the JSON format for submitting messages and offers a shareable setup link.
+The **Помощь** button shows the JSON format for submitting messages and offers a shareable setup link. When configured with a personal device URL, it displays and copies that URL only in the recipient's private chat.
 
 ## Send a message
 
@@ -38,6 +38,8 @@ Create a Telegram bot, then open its private chat from the recipient account and
 | `SMS_ROUTER_APP_TOKEN` | Bearer token issued to the dedicated router app |
 | `SMS_ROUTER_BASE_URL` | Router base URL, defaults to `http://127.0.0.1:18090`. Use HTTPS when connecting over an untrusted network. |
 | `SMS_ROUTER_PUBLIC_ORIGIN` | Optional public HTTPS origin of SMS Router, used for the endpoint example and the shareable setup link. Uses this document's guide when unset. |
+| `SMS_ROUTER_DEVICE_URL` | Optional personal HTTPS ingestion URL, including its device token. Store it outside the checkout with the other credentials. |
+| `SMS_ROUTER_HELP_SERVICE`, `SMS_ROUTER_HELP_SENDER` | Optional registered service and sender shown in the bot's JSON example |
 | `SMS_INBOX_STATE_DIR` | Writable directory for delivery receipts, defaults to `state/` in the working directory |
 
 ## Run
