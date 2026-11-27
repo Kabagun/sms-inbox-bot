@@ -1,3 +1,4 @@
+import re
 import sqlite3
 from pathlib import Path
 from threading import Event
@@ -8,6 +9,38 @@ from .clients import Router, Sms, Telegram
 INBOX_LIMIT = 25
 TELEGRAM_TEXT_LIMIT = 4096
 CONTINUATION = "SMS (продолжение)\n"
+CODE_LABEL = r"\b(?:код|code|otp|pin)\b"
+CODE_NUMBER = r"(?<![\w+])(?<![0-9][.\-–—])([0-9]{4,8})(?!\w|[.\-–—][0-9])"
+CODE_AFTER_LABEL = re.compile(
+    rf"{CODE_LABEL}(?:[ \t]+(?:для[ \t]+)?(?:подтверждения|авторизации|входа|доступа|проверки|is))?"
+    rf"[ \t]*[:=–—-]?[ \t]*(?:\r?\n[ \t]*)?{CODE_NUMBER}",
+    re.IGNORECASE,
+)
+CODE_BEFORE_LABEL = re.compile(
+    rf"{CODE_NUMBER}[ \t]*[:=–—-]?[ \t]*(?:(?:это|ваш|your)[ \t]+){{0,2}}{CODE_LABEL}",
+    re.IGNORECASE,
+)
+
+
+def extract_code(text: str) -> str | None:
+    if re.fullmatch("[0-9]{4,8}", text.strip()):
+        return text.strip()
+    candidates = set(CODE_AFTER_LABEL.findall(text)) | set(CODE_BEFORE_LABEL.findall(text))
+    return candidates.pop() if len(candidates) == 1 else None
+
+
+def sms_header_entities(part: str) -> list[dict]:
+    title, _, tail = part.partition("\n")
+    sender, _, _ = tail.partition("\n")
+    title_length = len(title.encode("utf-16-le")) // 2
+    entities = [{"type": "bold", "offset": 0, "length": title_length}]
+    if sender.startswith("Отправитель: "):
+        entities.append({
+            "type": "bold",
+            "offset": title_length + 1,
+            "length": len(sender.encode("utf-16-le")) // 2,
+        })
+    return entities
 
 
 def sms_parts(sms: Sms) -> list[str]:
@@ -82,10 +115,17 @@ class Delivery:
         for sms in messages:
             parts = sms_parts(sms)
             sent = self.receipts.sent_parts(sms.id)
+            code = extract_code(sms.text)
             for part_index in range(sent, len(parts)):
                 if stop.is_set():
                     return False
-                self.telegram.send_sms(self.recipient_id, parts[part_index])
+                part = parts[part_index]
+                self.telegram.send_sms(
+                    self.recipient_id,
+                    part,
+                    entities=sms_header_entities(part) if part_index == 0 else None,
+                    copy_code=code if part_index == len(parts) - 1 else None,
+                )
                 self.receipts.record_part(sms.id, part_index + 1)
             self.router.acknowledge(sms.id)
             self.receipts.remove(sms.id)

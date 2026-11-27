@@ -28,6 +28,7 @@ class Settings:
     recipient_id: int
     router_url: str
     state_dir: Path
+    router_public_origin: str | None = None
 
     @classmethod
     def load(cls) -> "Settings":
@@ -53,9 +54,24 @@ class Settings:
                 raise ValueError
         except ValueError:
             raise ValueError("Set SMS_ROUTER_BASE_URL to a valid HTTP(S) base URL.") from None
+        public_origin = os.environ.get("SMS_ROUTER_PUBLIC_ORIGIN", "").removesuffix("/")
+        if public_origin:
+            try:
+                public_url = urlsplit(public_origin)
+                if (
+                    public_url.scheme != "https" or not public_url.hostname
+                    or public_url.port == 0 or public_url.username is not None
+                    or public_url.path or public_url.query or public_url.fragment
+                    or len(public_origin) > 255
+                    or re.search(r"[\s?#<>\\]", public_origin)
+                ):
+                    raise ValueError
+            except ValueError:
+                raise ValueError("Set SMS_ROUTER_PUBLIC_ORIGIN to a public HTTPS origin.") from None
         return cls(
             telegram_token, router_token, int(recipient), router_url,
             Path(os.environ.get("SMS_INBOX_STATE_DIR", "state")),
+            public_origin or None,
         )
 
 
@@ -80,7 +96,10 @@ def poll_until_stopped(
 def serve(settings: Settings, stop: Event) -> None:
     router = Router(settings.router_url, settings.router_token)
     telegram = Telegram(settings.telegram_token)
-    menu = Menu(router, telegram, settings.recipient_id)
+    menu = Menu(
+        router, telegram, settings.recipient_id,
+        router_public_origin=settings.router_public_origin,
+    )
     offset = None
 
     def poll_updates() -> bool:

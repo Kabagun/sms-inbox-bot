@@ -181,13 +181,28 @@ class Telegram:
             retryable=retryable_status(code) or retryable_status(status),
         )
 
-    def send_sms(self, recipient_id: int, text: str) -> None:
+    def send_sms(
+        self, recipient_id: int, text: str, *,
+        entities: list[dict] | None = None, copy_code: str | None = None,
+    ) -> None:
+        options = {}
+        if entities:
+            options["entities"] = entities
+        if copy_code:
+            options["reply_markup"] = {
+                "inline_keyboard": [[copy_button("Копировать код", copy_code)]],
+            }
         result = self.call(
             "sendMessage",
             chat_id=recipient_id,
             text=text,
             link_preview_options={"is_disabled": True},
             protect_content=True,
+            **options,
         )
         if not isinstance(result, dict) or type(result.get("message_id")) is not int:
             raise ApiError("Telegram sendMessage", "missing message confirmation")
+
+
+def copy_button(label: str, text: str) -> dict:
+    return {"text": label, "copy_text": {"text": text}}

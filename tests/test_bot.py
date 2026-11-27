@@ -5,6 +5,7 @@ import sqlite3
 import tempfile
 import unittest
 from contextlib import closing, contextmanager
+from html import unescape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Event, Thread, Timer
@@ -12,8 +13,8 @@ from unittest.mock import Mock, patch
 
 from sms_inbox_bot.__main__ import Settings, main, poll_until_stopped, serve
 from sms_inbox_bot.clients import ApiError, Router, Sms, Stream, Telegram
-from sms_inbox_bot.delivery import CONTINUATION, Delivery, DeliveryReceipts, sms_parts
-from sms_inbox_bot.menu import HELP, SUBSCRIPTIONS, Menu, stream_key
+from sms_inbox_bot.delivery import CONTINUATION, Delivery, DeliveryReceipts, extract_code, sms_parts
+from sms_inbox_bot.menu import HELP, PUBLIC_HELP_URL, SUBSCRIPTIONS, Menu, stream_key
 
 
 RECIPIENT = 123456
@@ -88,6 +89,24 @@ class StartupTests(unittest.TestCase):
             run.assert_not_called()
             self.assertIn("Check for an existing worker", logs.output[0])
 
+    def test_public_origin_never_contains_a_credential_or_device_path(self):
+        self.assertIsNone(Settings.load().router_public_origin)
+        with patch.dict(os.environ, {"SMS_ROUTER_PUBLIC_ORIGIN": "https://sms.example.net/"}):
+            self.assertEqual(Settings.load().router_public_origin, "https://sms.example.net")
+        for origin in (
+            "http://sms.example.net",
+            "https://user:synthetic@sms.example.net",
+            "https://sms.example.net/v1/sms/synthetic",
+            "https://sms.example.net/?token=synthetic",
+            r"https://sms.example.net\v1\sms\synthetic",
+        ):
+            with (
+                self.subTest(origin=origin),
+                patch.dict(os.environ, {"SMS_ROUTER_PUBLIC_ORIGIN": origin}),
+            ):
+                with self.assertRaisesRegex(ValueError, "SMS_ROUTER_PUBLIC_ORIGIN"):
+                    Settings.load()
+
 
 class MenuTests(unittest.TestCase):
     def setUp(self):
@@ -159,18 +178,35 @@ class MenuTests(unittest.TestCase):
         self.callback(enabled["callback_data"])
         self.router.subscribe.assert_called_once_with(self.stream.id, False)
 
-    def test_help_sends_only_subscription_instructions(self):
+    def test_help_documents_payload_and_copies_the_public_guide(self):
+        self.menu = Menu(
+            self.router, self.telegram, RECIPIENT,
+            router_public_origin="https://sms.example.net",
+        )
         self.message(HELP)
 
         self.router.streams.assert_not_called()
-        self.telegram.call.assert_called_once_with(
-            "sendMessage",
-            chat_id=RECIPIENT,
-            text=(
-                "В «Подписках» включите нужные потоки. Новые SMS из них "
-                "будут приходить сюда целиком."
-            ),
-        )
+        self.telegram.call.assert_called_once()
+        response = self.telegram.call.call_args
+        self.assertEqual(response.args, ("sendMessage",))
+        self.assertEqual(response.kwargs["chat_id"], RECIPIENT)
+        self.assertEqual(response.kwargs["parse_mode"], "HTML")
+        text = response.kwargs["text"]
+        self.assertIn("POST https://sms.example.net/v1/sms/&lt;device-token&gt;", text)
+        self.assertIn("application/json", text)
+        example = unescape(text.split("<pre>", 1)[1].split("</pre>", 1)[0])
+        self.assertEqual(json.loads(example), {
+            "service": "example", "sender": "EXAMPLE", "text": "Ваш код: 4837",
+        })
+        buttons = response.kwargs["reply_markup"]["inline_keyboard"][0]
+        self.assertEqual(buttons[0]["url"], "https://sms.example.net/")
+        self.assertEqual(buttons[1]["copy_text"], {"text": "https://sms.example.net/"})
+
+    def test_help_links_to_the_public_guide_without_a_configured_origin(self):
+        self.message(HELP)
+        buttons = self.telegram.call.call_args.kwargs["reply_markup"]["inline_keyboard"][0]
+        self.assertEqual(buttons[0]["url"], PUBLIC_HELP_URL)
+        self.assertEqual(buttons[1]["copy_text"], {"text": PUBLIC_HELP_URL})
 
     def test_revoked_stream_is_removed_without_a_subscription_request(self):
         self.router.streams.return_value = []
@@ -192,7 +228,7 @@ class DeliveryTests(unittest.TestCase):
             Delivery(self.router, self.telegram, RECIPIENT, receipts).poll(Event())
 
     def test_partial_message_resumes_and_ack_retries_across_restarts(self):
-        text = ("Demo & <text> 🧪\n" * 850) + "Synthetic ending"
+        text = "Verification code: 048377\n" + ("Demo & <text> 🧪\n" * 850) + "Synthetic ending"
         sms = Sms("item-1", "example", "DEMO", text, RECEIVED_AT)
         parts = sms_parts(sms)
         self.assertGreater(len(parts), 2)
@@ -217,6 +253,10 @@ class DeliveryTests(unittest.TestCase):
             [(RECIPIENT, parts[0]), (RECIPIENT, parts[1])]
             + [(RECIPIENT, part) for part in parts[1:]],
         )
+        self.assertEqual(
+            [call.kwargs["copy_code"] for call in self.telegram.send_sms.call_args_list],
+            [None] * len(parts) + ["048377"],
+        )
 
         self.router.acknowledge.side_effect = None
         self.telegram.reset_mock()
@@ -234,6 +274,22 @@ class DeliveryTests(unittest.TestCase):
             with self.assertRaisesRegex(ApiError, "missing message confirmation"):
                 self.poll()
         self.router.acknowledge.assert_not_called()
+
+    def test_extracts_a_unique_labeled_code_without_copying_unrelated_numbers(self):
+        cases = (
+            ("Код подтверждения: 012345. Заказ 4837.", "012345"),
+            ("Your verification code is: 4837", "4837"),
+            ("4837 — ваш код для входа", "4837"),
+            ("\n 4837 \n", "4837"),
+            ("Code: 4837. Code: 4837.", "4837"),
+            ("Заказ 4837, к оплате 5678 BYN.", None),
+            ("Код: 4837; PIN: 5544", None),
+            ("Код: 1234–5678", None),
+            ("Код: 123456789", None),
+        )
+        for text, expected in cases:
+            with self.subTest(text=text):
+                self.assertEqual(extract_code(text), expected)
 
 
 class HttpTests(unittest.TestCase):
@@ -287,8 +343,8 @@ class HttpTests(unittest.TestCase):
             "id": "sample-message",
             "stream_id": "sample-stream",
             "service": "example",
-            "sender": "DEMO",
-            "text": "A synthetic SMS with markup <demo> and emoji 🧪.",
+            "sender": "DEMO 🧪",
+            "text": "Verification code: 048377. A synthetic SMS with markup <demo>.",
             "received_at": RECEIVED_AT,
         }
 
@@ -317,7 +373,7 @@ class HttpTests(unittest.TestCase):
             if path == f"{STUB_BOT}/answerCallbackQuery":
                 return 400, {"ok": False, "error_code": 400}
             if path == f"{STUB_BOT}/sendMessage":
-                if "reply_markup" in payload:
+                if "keyboard" in payload.get("reply_markup", {}):
                     completed.add("menu")
                 if completed == {"menu", "delivery"}:
                     stop.set()
@@ -351,13 +407,24 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(updates[0]["timeout"], 20)
         sends = [
             (index, payload) for index, (_, path, _, payload) in enumerate(calls)
-            if path == f"{STUB_BOT}/sendMessage" and "reply_markup" not in payload
+            if path == f"{STUB_BOT}/sendMessage" and "keyboard" not in payload.get("reply_markup", {})
         ]
         self.assertEqual(len(sends), 1)
         index, payload = sends[0]
         self.assertIn(sms["text"], payload["text"])
         self.assertEqual(payload["chat_id"], RECIPIENT)
         self.assertNotIn("parse_mode", payload)
+        self.assertEqual(payload["reply_markup"], {"inline_keyboard": [[{
+            "text": "Копировать код", "copy_text": {"text": "048377"},
+        }]]})
+        encoded_message = payload["text"].encode("utf-16-le")
+        highlighted = []
+        for entity in payload["entities"]:
+            start = 2 * entity["offset"]
+            end = start + 2 * entity["length"]
+            self.assertEqual(entity["type"], "bold")
+            highlighted.append(encoded_message[start:end].decode("utf-16-le"))
+        self.assertEqual(highlighted, ["SMS · example", "Отправитель: DEMO 🧪"])
         self.assertLess(index, next(i for i, call in enumerate(calls) if call[0] == "DELETE"))
 
 

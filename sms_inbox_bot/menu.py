@@ -1,15 +1,45 @@
 from collections import Counter
 from hashlib import sha256
+from html import escape
 
-from .clients import ApiError, Router, Stream, Telegram
+from .clients import ApiError, Router, Stream, Telegram, copy_button
 
 
 SUBSCRIPTIONS = "Подписки"
 HELP = "Помощь"
+PUBLIC_HELP_URL = "https://github.com/Kabagun/sms-inbox-bot#send-a-message"
 MAIN_KEYBOARD = {
     "keyboard": [[{"text": SUBSCRIPTIONS}, {"text": HELP}]],
     "resize_keyboard": True,
 }
+
+
+def help_view(router_public_origin: str | None) -> dict:
+    origin = router_public_origin or "https://sms.example.com"
+    endpoint = escape(f"{origin}/v1/sms/<device-token>")
+    guide = f"{router_public_origin}/" if router_public_origin else PUBLIC_HELP_URL
+    example = '{"service":"example","sender":"EXAMPLE","text":"Ваш код: 4837"}'
+    return {
+        "text": (
+            "<b>Как отправить сообщение</b>\n\n"
+            f"<code>POST {endpoint}</code>\n"
+            "<code>Content-Type: application/json</code>\n\n"
+            f"<pre>{escape(example, quote=False)}</pre>\n\n"
+            "<code>service</code> — имя зарегистрированного потока. "
+            "<code>text</code> — полный текст сообщения. "
+            "<code>sender</code> — зарегистрированный отправитель. "
+            "Если у потока один отправитель, это поле можно опустить.\n\n"
+            "Получите персональный адрес с токеном у владельца потока. "
+            "Чтобы сообщения приходили сюда, включите поток в «Подписках»."
+        ),
+        "parse_mode": "HTML",
+        "reply_markup": {
+            "inline_keyboard": [[
+                {"text": "Инструкция", "url": guide},
+                copy_button("Копировать ссылку", guide),
+            ]],
+        },
+    }
 
 
 def stream_key(stream_id: str) -> str:
@@ -36,10 +66,14 @@ def subscription_view(streams: list[Stream]) -> dict:
 
 
 class Menu:
-    def __init__(self, router: Router, telegram: Telegram, recipient_id: int) -> None:
+    def __init__(
+        self, router: Router, telegram: Telegram, recipient_id: int, *,
+        router_public_origin: str | None = None,
+    ) -> None:
         self.router = router
         self.telegram = telegram
         self.recipient_id = recipient_id
+        self.router_public_origin = router_public_origin
 
     def _is_recipient(self, sender: dict, chat: dict) -> bool:
         return (
@@ -73,10 +107,7 @@ class Menu:
         elif text == HELP:
             self.telegram.call(
                 "sendMessage", chat_id=self.recipient_id,
-                text=(
-                    "В «Подписках» включите нужные потоки. Новые SMS из них "
-                    "будут приходить сюда целиком."
-                ),
+                **help_view(self.router_public_origin),
             )
 
     def _handle_callback(self, query: dict) -> None:
